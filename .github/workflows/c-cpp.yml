@@ -1,43 +1,101 @@
-name: Reproducible Android Build
-# on:
-#   workflow_dispatch:
-#     inputs:
-#       branch:
-#         description: "Branch to build from"
-#         required: true
-#         default: "reproducible-builds-2"
+name: Continuous Integration
 
 on:
-  push:
-    branches:
-      - master
   pull_request:
     branches:
-      - master
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
-  build-android:
+  test-typescript:
+    name: TypeScript Tests
     runs-on: ubuntu-latest
-    container: reactnativecommunity/react-native-android@sha256:4ff9c9f80da57c72284900fcfdbd079183e735684c62d7fafd3df50fdb895453
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        id: setup-node
+        uses: actions/setup-node@v4
         with:
-          ref: ${{ inputs.branch }}
-      - name: Envinfo
-        run: npx envinfo
-      - name: Install dependencies
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install Dependencies
+        id: npm-ci
+        run: npm ci
+
+      - name: Check Format
+        id: npm-format-check
+        run: npm run format:check
+
+      - name: Lint
+        id: npm-lint
+        run: npm run lint
+
+      - name: Test
+        id: npm-ci-test
+        run: npm run ci-test
+
+  test-action:
+    name: GitHub Actions Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+      - name: Install node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install npm Dependencies
+        id: npm-ci
+        run: npm ci
+
+      - name: Start Mock Server
+        id: mock-server
         run: |
-          apt-get update
-          apt-get install -y curl unzip
-      - name: Build application
-        run: yarn build-unsigned-android
-      - name: Find APK path
+          npm run mock-server &
+          echo $! > "$(pwd)/mock-server.PID"
+          sleep 1 # Give it a moment before logging
+
+      - name: Wait for Mock Server
         run: |
-          apk_path=$(find . -type f -name "*.apk" | head -n 1)
-          echo "APK PATH: $apk_path"
-          for f in ./android/app/build/outputs/apk/chainmainnetNormal/release/*.apk; do
-            RENAMED_FILENAME=$(echo $f | sed -e "s/app-/blixt-/" | sed -e "s/-release-unsigned//")
-            mv $f $RENAMED_FILENAME
-            sha256sum $RENAMED_FILENAME
+          for i in {1..10}; do
+            echo "Attempt $i"
+            curl --fail http://localhost:3000/v1/ && echo "Mock server is up" && break || echo "Waiting for mock server..."
+            sleep 5
           done
-          echo -e "\n"
+
+      - name: Verify Mock Server is Up
+        run: |
+          curl --fail http://localhost:3000/v1/ || (echo "Mock server not accessible" && exit 1)
+
+      - name: Test Local Action
+        id: test-action
+        uses: ./
+        with:
+          links-filepath: '.lighthouseci/links.json'
+          base-url: 'http://localhost:3000/v1'
+          project-id: 'mock-project-id'
+          current-commit-sha: '59e778936f40d70edb2af15d61fdeb5cae661649'
+
+      - name: Print Output
+        id: output
+        run: |
+          echo "${{ steps.test-action.outputs.markdown }}"
+          echo "${{ steps.test-action.outputs.comparedMetrics }}"
+
+      - name: Kill Mock Server
+        if: always()
+        run: |
+          kill "$(cat mock-server.PID)"
